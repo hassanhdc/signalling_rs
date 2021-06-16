@@ -128,7 +128,7 @@ impl Server {
 
             let peers = self.peers.lock().unwrap();
 
-            let (peer, msg) = if let None = peers.get(&to_id) {
+            let (peer, resp) = if let None = peers.get(&to_id) {
                 // If peer with "to_id" is not connected, alter the message and return the the same peer
                 (
                     peers
@@ -151,7 +151,7 @@ impl Server {
 
             // Access the channel for the returned peer to we can forward them the message
             let tx = &peer.tx.lock().unwrap();
-            tx.unbounded_send(WsMessage::Text(msg.into()))
+            tx.unbounded_send(WsMessage::Text(resp.into()))
                 .with_context(|| format!("Failed to message on channel"))?;
 
             // let rooms = self.rooms.lock().unwrap();
@@ -186,10 +186,85 @@ impl Server {
 
             println!("\nGOT COMMAND: {}\nROOM: {}\n", command, room_id);
 
+            let peers = self.peers.lock().unwrap();
+            let mut rooms = self.rooms.lock().unwrap();
+
             // We are now handling the CMD_ROOM 'CREATE' and 'JOIN' cases within the same branch for brevity and conciseness
             // since we will be checking/modifying related state, why not group the code at one place
 
-            // TODO: Conditionallly handle the cases for "ROOM CREATE" AND "ROOM JOIN"
+            let peer = peers.get(&from_id).unwrap().to_owned();
+
+            // Ensure peer.status == None
+            if let Some(status) = *peer.status.lock().unwrap() {
+                bail!(
+                    "Peer {} is giving CMD_ROOM_{} but is already in ROOM {}",
+                    from_id,
+                    command,
+                    status
+                );
+            }
+
+            let resp = if command == "CREATE" {
+                println!("{}: CREATE ROOM {}", from_id, room_id);
+
+                // Conditionally create the the response for the peer
+                let resp = if let None = rooms.get(&room_id) {
+                    // If the room_id is unique, create the ROOM and enter the peer into the ROOM
+                    rooms.insert(room_id, vec![from_id]);
+
+                    // Change the peer state
+                    let peer = peers.get(&from_id).unwrap().to_owned();
+                    *peer.status.lock().unwrap() = Some(room_id);
+                    drop(peer);
+
+                    // ROOM created, we're good
+                    println!("ROOM {} created", room_id);
+                    format!("ROOM_OK")
+                } else {
+                    // The given room_id is not unique
+                    format!("ERROR ROOM {} already exists", room_id)
+                };
+                // Debug
+                println!("\nPEERS: {:?}\nROOMS:{:?}\n", peers, rooms);
+
+                // Propagate the response to the outer block
+                resp
+            } else if command == "JOIN" {
+                println!("{}: JOIN ROOM {}", from_id, room_id);
+
+                let resp = if let Some(_) = rooms.get(&room_id) {
+                    // If the room_id exists, enter the peer into the rooms hashmap
+                    rooms.get_mut(&room_id).unwrap().push(from_id);
+
+                    // Change the peer status
+                    let peer = peers.get(&from_id).unwrap().to_owned();
+                    *peer.status.lock().unwrap() = Some(room_id);
+                    drop(peer);
+
+                    // ROOM joined, we're good
+                    println!("ROOM {} exists, joining..", room_id);
+                    format!("ROOM_OK")
+                } else {
+                    // ROOM not present for the given room_id
+                    println!("ROOM {} does not exist", room_id);
+                    format!("ERROR ROOM {} does not exist", room_id)
+                };
+                // Debug
+                println!("\nPEERS: {:?}\nROOMS:{:?}\n", peers, rooms);
+
+                // Propagate the response to the outer block
+                resp
+            } else {
+                // CMD received was neither "CREATE" nor "JOIN"
+                bail!("Received invalid command message: {}", command)
+            };
+            drop(peers);
+            drop(rooms);
+
+            // Forward the response we created to the peer's channel
+            let tx = &peer.tx.lock().unwrap();
+            tx.unbounded_send(WsMessage::Text(resp.into()))
+                .with_context(|| format!("Failed to message on channel"))?;
 
             // let mut split = message["CMD_ROOM_CREATE ".len()..].splitn(2, ' ');
             // let room_id = split
@@ -197,41 +272,8 @@ impl Server {
             //     .and_then(|s| str::parse::<u32>(s).ok())
             //     .ok_or_else(|| anyhow!("Cannot parse ROOM ID from message"))
             //     .unwrap();
-
-            println!("{}: CREATE ROOM {}", from_id, room_id);
-
-            let peers = self.peers.lock().unwrap();
-            let mut rooms = self.rooms.lock().unwrap();
-
-            let peer = peers.get(&from_id).unwrap().to_owned();
-
-            // Ensure peers status is None
-            if let Some(status) = *peer.status.lock().unwrap() {
-                bail!("Peer {} is already in ROOM {}", from_id, status);
-            }
-
-            let msg = if let None = rooms.get(&room_id) {
-                // If the room_id is unique, create the ROOM
-                rooms.insert(room_id, vec![from_id]);
-                // Enter the peer into the ROOM
-                let peer = peers.get(&from_id).unwrap().to_owned();
-                *peer.status.lock().unwrap() = Some(room_id);
-                format!("ROOM_OK")
-            } else {
-                format!("ERROR ROOM {} already exists", room_id)
-            };
-            // Debug
-            println!("\nPEERS: {:?}\nROOMS:{:?}\n", peers, rooms);
-            drop(peers);
-            drop(rooms);
-
-            let tx = &peer.tx.lock().unwrap();
-            tx.unbounded_send(WsMessage::Text(msg.into()))
-                .with_context(|| format!("Failed to message on channel"))?;
         }
-        // else if message.starts_with("CMD_ROOM_JOIN") {
-        //     let mut split = message["CMD_ROOM_JOIN ".len()..].splitn(2, ' ');
-        // }
+
         Ok(())
     }
 }
