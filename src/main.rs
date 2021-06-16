@@ -265,13 +265,6 @@ impl Server {
             let tx = &peer.tx.lock().unwrap();
             tx.unbounded_send(WsMessage::Text(resp.into()))
                 .with_context(|| format!("Failed to message on channel"))?;
-
-            // let mut split = message["CMD_ROOM_CREATE ".len()..].splitn(2, ' ');
-            // let room_id = split
-            //     .next()
-            //     .and_then(|s| str::parse::<u32>(s).ok())
-            //     .ok_or_else(|| anyhow!("Cannot parse ROOM ID from message"))
-            //     .unwrap();
         }
 
         Ok(())
@@ -313,25 +306,6 @@ async fn message_loop(
 
     Ok(())
 }
-
-// async fn ws_read(ws_stream: SplitStream<Socket>) -> Result<()> {
-//     let mut ws_stream = ws_stream.fuse();
-//     loop {
-//         let ws_msg: Option<WsMessage> = futures::select! {
-//             ws_msg = ws_stream.select_next_some() => {
-//                 match ws_msg? {
-//                 WsMessage::Text(text) => {
-//                     println!("\nMessage Received: {}\n", text);
-//                     None
-//                 },
-//                 _ => None
-//             }
-//             }
-//             complete => break
-//         };
-//     }
-//     Ok(())
-// }
 
 #[tokio::main]
 async fn main() {
