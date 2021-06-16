@@ -1,5 +1,4 @@
 use anyhow::{anyhow, bail, Context, Result};
-use serde_derive::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     net::SocketAddr,
@@ -13,6 +12,7 @@ use futures::channel::mpsc::{self, UnboundedReceiver};
 // I have not gotten around to implementing peer messages as enum variants
 // which are deserialized and serialized as JSON messages
 
+// use serde_derive::{Deserialize, Serialize};
 // #[derive(Serialize, Deserialize)]
 // #[serde(rename_all = "lowercase")]
 // enum SocketMsg {
