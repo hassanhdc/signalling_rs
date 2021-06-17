@@ -83,7 +83,7 @@ async fn main() {
                             .and_then(|s| str::parse::<u32>(s).ok())
                             .ok_or_else(|| anyhow!("Cannot parse peer id"))
                             .unwrap();
-                        println!("Peer wants to register with ID: {}", &peer_id);
+                        println!("Peer is registering with ID: {}", &peer_id);
                         Some(peer_id)
                     } else {
                         None
