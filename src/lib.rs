@@ -254,9 +254,8 @@ impl Server {
             // We are now handling the CMD_ROOM 'CREATE' and 'JOIN' cases within the same branch for brevity and conciseness
             // since we will be checking/modifying related state, why not group the code at one place
 
-            let peer = peers.get(&from_id).unwrap().to_owned();
-
             // Ensure peer.status == None
+            let peer = peers.get(&from_id).unwrap().to_owned();
             if let Some(status) = *peer.status.lock().unwrap() {
                 bail!(
                     "Peer {} is giving CMD_ROOM_{} but is already in ROOM {}",
