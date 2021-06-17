@@ -58,8 +58,8 @@ pub struct Peer(Arc<PeerInner>);
 pub struct PeerInner {
     id: u32,
     addr: SocketAddr,
-    status: Mutex<Option<u32>>,
-    tx: Arc<Mutex<mpsc::UnboundedSender<WsMessage>>>,
+    pub status: Mutex<Option<u32>>,
+    pub tx: Arc<Mutex<mpsc::UnboundedSender<WsMessage>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -133,15 +133,15 @@ impl Server {
         Ok(server)
     }
     pub fn handle_message(&self, message: &str, from_id: u32) -> Result<()> {
-        if message.starts_with("MSG_ROOM_PEER") {
+        if message.starts_with("ROOM_PEER_MSG") {
             // This condition is met under the following assumption:
             // The peer sending the message is already in a ROOM - Assert the following
             // i.e. peer.status != None
 
             // Action:
-            // Forward message addressed to the room peer - if not present, inform the sending peer
+            // Forward message addressed to the recepient - if not connected, inform the sending peer
 
-            let mut split = message["MSG_ROOM_PEER ".len()..].splitn(2, ' ');
+            let mut split = message["ROOM_PEER_MSG ".len()..].splitn(2, ' ');
             let to_id = split
                 .next()
                 .and_then(|s| str::parse::<u32>(s).ok())
@@ -164,7 +164,7 @@ impl Server {
             }
 
             let (peer, resp) = if let None = peers.get(&to_id) {
-                // If peer with "to_id" is not connected, alter the message and return the same peer
+                // If recepient peer is not connected, inform the sending peer
                 (
                     peers
                         .get(&from_id)
@@ -173,7 +173,9 @@ impl Server {
                     format!("ERROR peer {} not found", to_id),
                 )
             } else {
-                // If peer with "to_id" is connected, message remains same and the return "to_id" peer
+                // Recepient peer is connected
+
+                // Get "room_id" of the sender
                 let room_id = peers
                     .get(&from_id)
                     .ok_or_else(|| anyhow!("Cannot find peer {}", from_id))?
@@ -182,6 +184,8 @@ impl Server {
                     .unwrap()
                     .unwrap();
 
+                // Inform the sender if recepient is not present
+                // else forward the message to the recepient as is
                 rooms
                     .get(&room_id)
                     .unwrap()
@@ -217,7 +221,7 @@ impl Server {
             let tx = &peer.tx.lock().unwrap();
             tx.unbounded_send(WsMessage::Text(resp.into()))
                 .with_context(|| format!("Failed to message on channel"))?;
-        } else if message.starts_with("CMD_ROOM") {
+        } else if message.starts_with("ROOM_CMD") {
             // This condition is met under the following assumption:
             // The peer sending the message is not in a ROOM - Assert the following
             // i.e. peer.status == None
@@ -229,7 +233,7 @@ impl Server {
             // Implement MCU logic for ROOM creation i.e. MCU creates aliases for every room created
             // The alias acts as a peer where peer_id == room_id and is the facilitator of audio/video conference
 
-            let mut msg = message["CMD_ROOM".len()..].split("_").skip(1);
+            let mut msg = message["ROOM_CMD".len()..].split("_").skip(1);
             let mut split = msg
                 .next()
                 .ok_or_else(|| anyhow!("Cannot split command message"))
@@ -295,7 +299,8 @@ impl Server {
 
                 if let Some(_) = rooms.get(&room_id) {
                     // If the room_id exists, enter the peer into the rooms hashmap
-                    rooms.get_mut(&room_id).unwrap().push(from_id);
+                    let room = rooms.get_mut(&room_id).unwrap();
+                    room.push(from_id);
 
                     // Change the peer status
                     let peer = peers.get(&from_id).unwrap().to_owned();
@@ -304,6 +309,20 @@ impl Server {
 
                     // ROOM joined, we're good
                     println!("ROOM {} exists, joining..", room_id);
+
+                    // Let other peers know who joined
+                    // FIX: We only need to inform the server present in the room
+                    room.iter()
+                        .map(|other| peers.get(&other).unwrap().to_owned())
+                        .for_each(move |peer| {
+                            let tx = &peer.tx.lock().unwrap();
+                            tx.unbounded_send(WsMessage::Text(format!(
+                                "ROOM_PEER_JOINED {}",
+                                from_id
+                            )))
+                            .with_context(|| format!("Failed to message on channel"))
+                            .unwrap();
+                        });
 
                     format!("ROOM_OK")
                 } else {
