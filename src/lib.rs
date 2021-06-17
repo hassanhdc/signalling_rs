@@ -155,9 +155,16 @@ impl Server {
             println!("{} -> {}: {}", from_id, to_id, msg);
 
             let peers = self.peers.lock().unwrap();
+            let rooms = self.rooms.lock().unwrap();
+
+            // Ensure peer.status == None
+            let peer = peers.get(&from_id).unwrap().to_owned();
+            if let None = *peer.status.lock().unwrap() {
+                bail!("Peer {} is not in a ROOM", from_id)
+            }
 
             let (peer, resp) = if let None = peers.get(&to_id) {
-                // If peer with "to_id" is not connected, alter the message and return the the same peer
+                // If peer with "to_id" is not connected, alter the message and return the same peer
                 (
                     peers
                         .get(&from_id)
@@ -167,22 +174,49 @@ impl Server {
                 )
             } else {
                 // If peer with "to_id" is connected, message remains same and the return "to_id" peer
-                (
-                    peers
-                        .get(&to_id)
-                        .ok_or_else(|| anyhow!("Cannot find peer {}", to_id))?
-                        .to_owned(),
-                    msg.to_string(),
-                )
+                let room_id = peers
+                    .get(&from_id)
+                    .ok_or_else(|| anyhow!("Cannot find peer {}", from_id))?
+                    .status
+                    .lock()
+                    .unwrap()
+                    .unwrap();
+
+                rooms
+                    .get(&room_id)
+                    .unwrap()
+                    .contains(&to_id)
+                    .then(|| ())
+                    .map_or_else(
+                        || {
+                            (
+                                peers
+                                    .get(&from_id)
+                                    .ok_or_else(|| anyhow!("Cannot find peer {}", from_id))
+                                    .unwrap()
+                                    .to_owned(),
+                                format!("ERROR peer {} not present in room {}", to_id, room_id),
+                            )
+                        },
+                        |_| {
+                            (
+                                peers
+                                    .get(&to_id)
+                                    .ok_or_else(|| anyhow!("Cannot find peer {}", to_id))
+                                    .unwrap()
+                                    .to_owned(),
+                                msg.to_string(),
+                            )
+                        },
+                    )
             };
             drop(peers);
+            drop(rooms);
 
             // Access the channel for the returned peer to we can forward them the message
             let tx = &peer.tx.lock().unwrap();
             tx.unbounded_send(WsMessage::Text(resp.into()))
                 .with_context(|| format!("Failed to message on channel"))?;
-
-            // let rooms = self.rooms.lock().unwrap();
         } else if message.starts_with("CMD_ROOM") {
             // This condition is met under the following assumption:
             // The peer sending the message is not in a ROOM - Assert the following
@@ -232,11 +266,11 @@ impl Server {
                 );
             }
 
+            // Conditionally create the the response for the peer
             let resp = if command == "CREATE" {
                 println!("{}: CREATE ROOM {}", from_id, room_id);
 
-                // Conditionally create the the response for the peer
-                let resp = if let None = rooms.get(&room_id) {
+                if let None = rooms.get(&room_id) {
                     // If the room_id is unique, create the ROOM and enter the peer into the ROOM
                     rooms.insert(room_id, vec![from_id]);
 
@@ -247,20 +281,20 @@ impl Server {
 
                     // ROOM created, we're good
                     println!("ROOM {} created", room_id);
+
                     format!("ROOM_OK")
                 } else {
                     // The given room_id is not unique
-                    format!("ERROR ROOM {} already exists", room_id)
-                };
-                // Debug
-                println!("\nPEERS: {:?}\nROOMS:{:?}\n", peers, rooms);
+                    println!("ROOM {} already exists", room_id);
 
-                // Propagate the response to the outer block
-                resp
+                    format!("ERROR ROOM {} already exists", room_id)
+                }
+                // Debug
+                // println!("\nPEERS: {:?}\nROOMS:{:?}\n", peers, rooms);
             } else if command == "JOIN" {
                 println!("{}: JOIN ROOM {}", from_id, room_id);
 
-                let resp = if let Some(_) = rooms.get(&room_id) {
+                if let Some(_) = rooms.get(&room_id) {
                     // If the room_id exists, enter the peer into the rooms hashmap
                     rooms.get_mut(&room_id).unwrap().push(from_id);
 
@@ -271,17 +305,16 @@ impl Server {
 
                     // ROOM joined, we're good
                     println!("ROOM {} exists, joining..", room_id);
+
                     format!("ROOM_OK")
                 } else {
                     // ROOM not present for the given room_id
                     println!("ROOM {} does not exist", room_id);
-                    format!("ERROR ROOM {} does not exist", room_id)
-                };
-                // Debug
-                println!("\nPEERS: {:?}\nROOMS:{:?}\n", peers, rooms);
 
-                // Propagate the response to the outer block
-                resp
+                    format!("ERROR ROOM {} does not exist", room_id)
+                }
+                // Debug
+                // println!("\nPEERS: {:?}\nROOMS:{:?}\n", peers, rooms);
             } else {
                 // CMD received was neither "CREATE" nor "JOIN"
                 bail!("Received invalid command message: {}", command)
