@@ -4,12 +4,13 @@ use futures::channel::mpsc::UnboundedReceiver;
 use futures::sink::SinkExt;
 use futures::stream::StreamExt;
 
+use tokio::sync::mpsc;
 use tokio_tungstenite::{tungstenite, WebSocketStream};
 use tungstenite::Message as WsMessage;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 
-use server::{Peer, Server};
+use server::Server;
 
 type Socket = WebSocketStream<TcpStream>;
 
@@ -29,7 +30,7 @@ async fn message_loop(
             ws_msg = ws_stream.select_next_some() => {
                 match ws_msg? {
                     WsMessage::Text(text) => {
-                        println!("\nMessage Received: {}\n", &text);
+                        // println!("\nMessage Received: {}\n", &text);
                         server.handle_message(&text, peer_id)?;
                         None
                     },
@@ -73,23 +74,8 @@ async fn main() {
                 .unwrap()
                 .unwrap();
 
-            let peer_id = msg
-                .into_text()
-                .map(|text| {
-                    if text.starts_with("Hello") {
-                        let mut split = text["Hello ".len()..].splitn(2, ' ');
-                        let peer_id = split
-                            .next()
-                            .and_then(|s| str::parse::<u32>(s).ok())
-                            .ok_or_else(|| anyhow!("Cannot parse peer id"))
-                            .unwrap();
-                        println!("Peer is registering with ID: {}", &peer_id);
-                        Some(peer_id)
-                    } else {
-                        None
-                    }
-                })
-                .expect("Server did not say Hello");
+            // let (tx, rx) = mpsc::channel::<WsMessage>(10);
+            let (peer_id, ws_rx) = server.register_peer(msg, addr).unwrap();
 
             // Let the peer know they're registered
             socket
@@ -97,72 +83,61 @@ async fn main() {
                 .await
                 .unwrap();
 
-            let ws_rx = if let Some(peer_id) = peer_id {
-                let mut peers = server.peers.lock().unwrap();
-                let (peer, rx) = Peer::new(peer_id, addr, None).unwrap();
-                peers.insert(peer_id, peer);
-                Some(rx)
-            } else {
-                None
-            }
-            .unwrap();
-
-            let peer_id = peer_id.unwrap();
             println!("Peer {} registered\n", &peer_id);
 
-            if let Err(err) = message_loop(&server, socket, peer_id, ws_rx).await {
-                eprintln!("An error occurred: {}\n", err);
+            if let Err(_) = message_loop(&server, socket, peer_id, ws_rx).await {
+                server.remove_peer(peer_id).await.unwrap();
             }
 
             // If we are reaching this point - the peer has left
-            {
-                let mut peers = server.peers.lock().unwrap();
+            // {
+            //     let mut peers = server.peers.lock().unwrap();
 
-                let peer = match peers.get(&peer_id).map(|peer| peer.to_owned()) {
-                    Some(room) => Some(room),
-                    _ => None,
-                }
-                .unwrap();
+            //     let peer = match peers.get(&peer_id).map(|peer| peer.to_owned()) {
+            //         Some(room) => Some(room),
+            //         _ => None,
+            //     }
+            //     .unwrap();
 
-                match peer.status.lock().map(|id| *id).unwrap() {
-                    Some(room_id) => {
-                        let mut rooms = server.rooms.lock().unwrap();
-                        let room = rooms.get_mut(&room_id).unwrap();
-                        if room.len() == 1 {
-                            println!("Last peer in the room {} left, destroying room...", room_id);
+            //     match peer.status.lock().map(|id| *id).unwrap() {
+            //         Some(room_id) => {
+            //             let mut rooms = server.rooms.lock().unwrap();
+            //             let room = rooms.get_mut(&room_id).unwrap();
+            //             if room.len() == 1 {
+            //                 println!("Last peer in the room {} left, destroying room...", room_id);
 
-                            room.remove(0);
-                            rooms.remove(&room_id);
-                        } else {
-                            println!("Room {} cleaned for peer {}", room_id, peer_id);
+            //                 room.remove(0);
+            //                 rooms.remove(&room_id);
+            //             } else {
+            //                 println!("Room {} cleaned for peer {}", room_id, peer_id);
 
-                            room.retain(|val| val != &peer_id);
+            //                 room.retain(|val| val != &peer_id);
 
-                            // FIX: We only need to inform the server present in the ROOM
-                            room.iter()
-                                .map(|other| peers.get(&other).unwrap().to_owned())
-                                .for_each(move |peer| {
-                                    let tx = &peer.tx.lock().unwrap();
-                                    tx.unbounded_send(WsMessage::Text(format!(
-                                        "ROOM_PEER_LEFT {}",
-                                        peer_id
-                                    )))
-                                    .with_context(|| format!("Failed to message on channel"))
-                                    .unwrap();
-                                });
-                        }
-                    }
-                    None => (),
-                };
+            //                 // FIX: We only need to inform the server present in the ROOM
+            //                 room.iter()
+            //                     .map(|other| peers.get(&other).unwrap().to_owned())
+            //                     .for_each(move |peer| {
+            //                         let tx = &peer.tx.lock().unwrap();
+            //                         tx.unbounded_send(WsMessage::Text(format!(
+            //                             "ROOM_PEER_LEFT {}",
+            //                             peer_id
+            //                         )))
+            //                         .with_context(|| format!("Failed to send message on channel"))
+            //                         .unwrap();
+            //                     });
+            //             }
+            //         }
+            //         None => (),
+            //     };
 
-                println!("Peer {} left. Removing..", &peer_id);
-                peers.remove(&peer_id);
-                // println!("PEERS: {:?}", peers);
+            //     println!("Peer {} left. Removing..", &peer_id);
+            //     peers.remove(&peer_id);
+            //     // println!("PEERS: {:?}", peers);
 
-                // TODO - DONE
-                // 1) Broadcast message to the MCU that the peer has left
-                // 2) Cleanup state - ROOM maintenance
-            }
+            //     // TODO - DONE
+            //     // 1) Broadcast message to the MCU that the peer has left
+            //     // 2) Cleanup state - ROOM maintenance
+            // }
         });
     }
 }
