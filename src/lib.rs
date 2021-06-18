@@ -3,6 +3,7 @@ use std::{
     collections::HashMap,
     net::SocketAddr,
     sync::{Arc, Mutex},
+    u32,
 };
 use tokio_tungstenite::tungstenite;
 use tungstenite::Message as WsMessage;
@@ -132,8 +133,94 @@ impl Server {
 
         Ok(server)
     }
+
+    pub fn register_peer(
+        &self,
+        msg: WsMessage,
+        addr: SocketAddr,
+    ) -> Result<(u32, UnboundedReceiver<WsMessage>)> {
+        let peer_id = msg
+            .into_text()
+            .map(|text| {
+                if text.starts_with("Hello") {
+                    let mut split = text["Hello ".len()..].splitn(2, ' ');
+                    let peer_id = split
+                        .next()
+                        .and_then(|s| str::parse::<u32>(s).ok())
+                        .ok_or_else(|| anyhow!("Cannot parse peer id"))
+                        .unwrap();
+                    println!("Peer is registering with ID: {}", &peer_id);
+                    Some(peer_id)
+                } else {
+                    None
+                }
+            })
+            .expect("Server did not say Hello");
+
+        let ws_rx = if let Some(peer_id) = peer_id {
+            let mut peers = self.peers.lock().unwrap();
+            let (peer, rx) = Peer::new(peer_id, addr, None).unwrap();
+            peers.insert(peer_id, peer);
+            Some(rx)
+        } else {
+            None
+        }
+        .unwrap();
+
+        let peer_id = peer_id.unwrap();
+
+        Ok((peer_id, ws_rx))
+    }
+
+    pub async fn remove_peer(&self, peer_id: u32) -> Result<()> {
+        let mut peers = self.peers.lock().unwrap();
+
+        let peer = match peers.get(&peer_id).map(|peer| peer.to_owned()) {
+            Some(room) => Some(room),
+            _ => None,
+        }
+        .unwrap();
+
+        match peer.status.lock().map(|id| *id).unwrap() {
+            Some(room_id) => {
+                let mut rooms = self.rooms.lock().unwrap();
+                let room = rooms.get_mut(&room_id).unwrap();
+                if room.len() == 1 {
+                    println!("Last peer in the room {} left, destroying room...", room_id);
+
+                    room.remove(0);
+                    rooms.remove(&room_id);
+                } else {
+                    println!("Room {} cleaned for peer {}", room_id, peer_id);
+
+                    room.retain(|val| val != &peer_id);
+
+                    // FIX: We only need to inform the server present in the ROOM
+                    room.iter()
+                        .map(|other| peers.get(&other).unwrap().to_owned())
+                        .for_each(move |peer| {
+                            let tx = &peer.tx.lock().unwrap();
+                            tx.unbounded_send(WsMessage::Text(format!(
+                                "ROOM_PEER_LEFT {}",
+                                peer_id
+                            )))
+                            .with_context(|| format!("Failed to send message on channel"))
+                            .unwrap();
+                        });
+                }
+            }
+            None => (),
+        };
+
+        println!("Peer {} left. Removing..", &peer_id);
+        peers.remove(&peer_id);
+        Ok(())
+    }
+
     pub fn handle_message(&self, message: &str, from_id: u32) -> Result<()> {
         if message.starts_with("ROOM_PEER_MSG") {
+            // TODO: Generalize this branch for "ROOM_PEER_..." messages
+
             // This condition is met under the following assumption:
             // The peer sending the message is already in a ROOM - Assert the following
             // i.e. peer.status != None
@@ -209,7 +296,7 @@ impl Server {
                                     .ok_or_else(|| anyhow!("Cannot find peer {}", to_id))
                                     .unwrap()
                                     .to_owned(),
-                                msg.to_string(),
+                                format!("ROOM_PEER_MSG {} {}", from_id, msg),
                             )
                         },
                     )
@@ -220,7 +307,7 @@ impl Server {
             // Access the channel for the returned peer to we can forward them the message
             let tx = &peer.tx.lock().unwrap();
             tx.unbounded_send(WsMessage::Text(resp.into()))
-                .with_context(|| format!("Failed to message on channel"))?;
+                .with_context(|| format!("failed to send message on channel"))?;
         } else if message.starts_with("ROOM_CMD") {
             // This condition is met under the following assumption:
             // The peer sending the message is not in a ROOM - Assert the following
@@ -313,6 +400,7 @@ impl Server {
                     // Let other peers know who joined
                     // FIX: We only need to inform the server present in the room
                     room.iter()
+                        .filter(|id| *id != &from_id)
                         .map(|other| peers.get(&other).unwrap().to_owned())
                         .for_each(move |peer| {
                             let tx = &peer.tx.lock().unwrap();
@@ -320,11 +408,18 @@ impl Server {
                                 "ROOM_PEER_JOINED {}",
                                 from_id
                             )))
-                            .with_context(|| format!("Failed to message on channel"))
+                            .with_context(|| format!("failed to send message on channel"))
                             .unwrap();
                         });
 
-                    format!("ROOM_OK")
+                    let list = room
+                        .iter()
+                        .filter(|id| *id != &from_id)
+                        .map(|id| id.to_string())
+                        .collect::<Vec<String>>()
+                        .join(" ");
+
+                    format!("ROOM_OK {}", list)
                 } else {
                     // ROOM not present for the given room_id
                     println!("ROOM {} does not exist", room_id);
@@ -343,7 +438,44 @@ impl Server {
             // Forward the response we created to the peer's channel
             let tx = &peer.tx.lock().unwrap();
             tx.unbounded_send(WsMessage::Text(resp.into()))
-                .with_context(|| format!("Failed to message on channel"))?;
+                .with_context(|| format!("failed to send message on channel"))?;
+        } else if message.starts_with("ROOM_PEER_LIST") {
+            // TODO: Refactor this bit into the "ROOM_PEER_..." branch
+            let peers = self.peers.lock().unwrap();
+            let rooms = self.rooms.lock().unwrap();
+            let peer = peers.get(&from_id).unwrap().to_owned();
+            let room_id = peer.status.lock().unwrap().unwrap();
+
+            let room = rooms.get(&room_id).unwrap();
+            let list = room
+                .iter()
+                .filter(|id| *id != &from_id)
+                .map(|id| id.to_string())
+                .collect::<Vec<String>>()
+                .join(" ");
+            drop(peers);
+            drop(rooms);
+
+            let resp = format!("ROOM_PEER_LIST {}", list);
+
+            let tx = &peer.tx.lock().unwrap();
+            tx.unbounded_send(WsMessage::Text(resp.into()))
+                .with_context(|| format!("failed to send message on channel"))?;
+        } else if message.starts_with("SERVER_INVITE") {
+            // TODO: Generalize this branch for "SERVER_..." messages
+            // For testing purpose I'm going to hardcode the MCU identity as being '999'
+            // FIX: Follow guidelines as stated in the design document
+            // let mut split = message["SERVER_INVITE ".len()..].splitn(2, ' ');
+            // let room_id = split
+            //     .next()
+            //     .and_then(|s| str::parse::<u32>(s).ok())
+            //     .unwrap();
+            let peers = self.peers.lock().unwrap();
+            let mcu = peers.get(&999_u32).unwrap().to_owned();
+
+            let tx = &mcu.tx.lock().unwrap();
+            tx.unbounded_send(WsMessage::Text(message.into()))
+                .with_context(|| format!("failed to send message on channel"))?;
         }
 
         Ok(())
