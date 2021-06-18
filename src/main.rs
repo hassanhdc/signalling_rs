@@ -89,51 +89,6 @@ async fn main() {
                 server.remove_peer(peer_id).await.unwrap();
             }
 
-            // If we are reaching this point - the peer has left
-            // {
-            //     let mut peers = server.peers.lock().unwrap();
-
-            //     let peer = match peers.get(&peer_id).map(|peer| peer.to_owned()) {
-            //         Some(room) => Some(room),
-            //         _ => None,
-            //     }
-            //     .unwrap();
-
-            //     match peer.status.lock().map(|id| *id).unwrap() {
-            //         Some(room_id) => {
-            //             let mut rooms = server.rooms.lock().unwrap();
-            //             let room = rooms.get_mut(&room_id).unwrap();
-            //             if room.len() == 1 {
-            //                 println!("Last peer in the room {} left, destroying room...", room_id);
-
-            //                 room.remove(0);
-            //                 rooms.remove(&room_id);
-            //             } else {
-            //                 println!("Room {} cleaned for peer {}", room_id, peer_id);
-
-            //                 room.retain(|val| val != &peer_id);
-
-            //                 // FIX: We only need to inform the server present in the ROOM
-            //                 room.iter()
-            //                     .map(|other| peers.get(&other).unwrap().to_owned())
-            //                     .for_each(move |peer| {
-            //                         let tx = &peer.tx.lock().unwrap();
-            //                         tx.unbounded_send(WsMessage::Text(format!(
-            //                             "ROOM_PEER_LEFT {}",
-            //                             peer_id
-            //                         )))
-            //                         .with_context(|| format!("Failed to send message on channel"))
-            //                         .unwrap();
-            //                     });
-            //             }
-            //         }
-            //         None => (),
-            //     };
-
-            //     println!("Peer {} left. Removing..", &peer_id);
-            //     peers.remove(&peer_id);
-            //     // println!("PEERS: {:?}", peers);
-
             //     // TODO - DONE
             //     // 1) Broadcast message to the MCU that the peer has left
             //     // 2) Cleanup state - ROOM maintenance
