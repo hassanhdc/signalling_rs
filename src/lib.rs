@@ -5,6 +5,7 @@ use std::{
     sync::{Arc, Mutex},
     u32,
 };
+use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite;
 use tungstenite::Message as WsMessage;
 
@@ -63,6 +64,7 @@ pub struct PeerInner {
     addr: SocketAddr,
     pub status: Mutex<Option<u32>>,
     pub tx: Arc<Mutex<mpsc::UnboundedSender<WsMessage>>>,
+    pub task_handle: JoinHandle<()>,
 }
 
 #[derive(Debug, Clone)]
@@ -94,6 +96,13 @@ impl std::ops::Deref for Peer {
     }
 }
 
+impl std::ops::Drop for PeerInner {
+    fn drop(&mut self) {
+        println!("Destructor was called for Peer {}\n", self.id);
+        self.task_handle.abort()
+    }
+}
+
 impl std::ops::Deref for Server {
     type Target = ServerInner;
 
@@ -107,9 +116,9 @@ impl Peer {
         id: u32,
         addr: SocketAddr,
         status: Option<u32>,
+        task_handle: JoinHandle<()>,
     ) -> Result<(Self, UnboundedReceiver<WsMessage>)> {
         let (tx, rx) = mpsc::unbounded::<WsMessage>();
-
         let status = Mutex::new(status);
 
         let peer = Peer(Arc::new(PeerInner {
@@ -117,6 +126,7 @@ impl Peer {
             addr,
             status,
             tx: Arc::new(Mutex::new(tx)),
+            task_handle,
         }));
 
         Ok((peer, rx))
@@ -140,6 +150,7 @@ impl Server {
         &self,
         msg: WsMessage,
         addr: SocketAddr,
+        task_handle: JoinHandle<()>,
     ) -> Result<(u32, UnboundedReceiver<WsMessage>)> {
         let peer_id = msg
             .into_text()
@@ -170,7 +181,7 @@ impl Server {
 
         let ws_rx = if let Some(peer_id) = peer_id {
             let mut peers = self.peers.lock().unwrap();
-            let (peer, rx) = Peer::new(peer_id, addr, None).unwrap();
+            let (peer, rx) = Peer::new(peer_id, addr, None, task_handle).unwrap();
             peers.insert(peer_id, peer);
             Some(rx)
         } else {
@@ -194,19 +205,25 @@ impl Server {
 
         match peer.status.lock().map(|id| *id).unwrap() {
             Some(room_id) => {
+                println!("\nCleanup for ROOM {}", room_id);
                 let mut rooms = self.rooms.lock().unwrap();
                 let room = rooms.get_mut(&room_id).unwrap();
-                println!("Room {} cleaned for peer {}", room_id, peer_id);
 
                 room.retain(|id| id != &peer_id);
+                println!("Room cleaned for peer {}", peer_id);
 
                 if (room.len() == 1) & room.contains(&room_id) {
                     // If only the MCU alias remains in the room, remove it
-                    println!("Last peer in the room {} left, destroying room...", room_id);
+                    println!(
+                        "\nLast peer in the room {} left, destroying room...",
+                        room_id
+                    );
 
-                    room.remove(0);
                     rooms.remove(&room_id);
                     println!("Terminating alias..");
+                    peers.remove(&room_id);
+                    // Debug
+                    // println!("\nROOMS: {:?}", rooms);
                     drop(rooms);
                 } else {
                     // FIX: We only need to inform the server present in the ROOM
@@ -227,8 +244,10 @@ impl Server {
             None => (),
         };
 
-        println!("Peer {} left. Removing..", &peer_id);
+        println!("\nPeer {} left", &peer_id);
         peers.remove(&peer_id);
+        // Debug
+        // println!("PEERS: {:?}", peers);
         drop(peers);
 
         Ok(())
@@ -325,6 +344,7 @@ impl Server {
             let tx = &peer.tx.lock().unwrap();
             tx.unbounded_send(WsMessage::Text(resp.clone().into()))
                 .with_context(|| format!("failed to send message on channel: {}", resp.clone()))?;
+            drop(tx);
         } else if message.starts_with("ROOM_CMD") {
             // This condition is met under the following assumption:
             // The peer sending the message is not in a ROOM - Assert the following
@@ -402,6 +422,7 @@ impl Server {
                             format!("failed to send message on channel: {}", mcu_msg.clone())
                         })
                         .unwrap();
+                    drop(mcu_tx);
 
                     format!("ROOM_OK")
                 } else {
@@ -441,6 +462,7 @@ impl Server {
                                     format!("failed to send message on channel: {}", msg.clone())
                                 })
                                 .unwrap();
+                            drop(tx);
                         });
 
                     let list = room
@@ -470,6 +492,7 @@ impl Server {
             let tx = &peer.tx.lock().unwrap();
             tx.unbounded_send(WsMessage::Text(resp.clone().into()))
                 .with_context(|| format!("failed to send message on channel: {}", resp.clone()))?;
+            drop(tx);
         } else if message.starts_with("ROOM_PEER_LIST") {
             // TODO: Refactor this bit into the "ROOM_PEER_..." branch
             let peers = self.peers.lock().unwrap();
@@ -492,6 +515,7 @@ impl Server {
             let tx = &peer.tx.lock().unwrap();
             tx.unbounded_send(WsMessage::Text(resp.clone().into()))
                 .with_context(|| format!("failed to send message on channel: {}", resp.clone()))?;
+            drop(tx);
         } else if message.starts_with("SERVER_INVITE") {
             // TODO: Generalize this branch for "SERVER_..." messages
             // For testing purpose I'm going to hardcode the MCU identity as being '999'
@@ -509,6 +533,7 @@ impl Server {
                 .with_context(|| {
                     format!("failed to send message on channel: {}", message.clone())
                 })?;
+            drop(tx);
         }
 
         Ok(())

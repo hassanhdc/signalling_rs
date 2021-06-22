@@ -1,11 +1,13 @@
-use tokio::join;
+use std::net::SocketAddr;
+
 use tokio::net::{TcpListener, TcpStream};
 
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::sink::SinkExt;
 use futures::stream::StreamExt;
 
-use tokio::sync::mpsc;
+use tokio::sync::oneshot::{self, Receiver};
+use tokio::task::JoinHandle;
 use tokio_tungstenite::{tungstenite, WebSocketStream};
 use tungstenite::Message as WsMessage;
 
@@ -51,6 +53,41 @@ async fn message_loop(
     Ok(())
 }
 
+async fn start_client(
+    server: &Server,
+    mut socket: Socket,
+    handle: Receiver<JoinHandle<()>>,
+    addr: SocketAddr,
+) {
+    // Register the incoming connection with a Peer_ID
+    println!("\nWebsocket connection established: {}", &addr);
+
+    let task_handle = match handle.await {
+        Ok(task_handle) => task_handle,
+        Err(_) => return,
+    };
+
+    let msg = socket
+        .next()
+        .await
+        .ok_or_else(|| anyhow!("Did not receive Hello"))
+        .unwrap()
+        .unwrap();
+
+    let (peer_id, ws_rx) = server.register_peer(msg, addr, task_handle).unwrap();
+
+    // Let the peer know they're registered
+    socket
+        .send(WsMessage::Text("Hello".to_string()))
+        .await
+        .unwrap();
+    println!("Peer {} registered\n", &peer_id);
+
+    if let Err(_) = message_loop(&server, socket, peer_id, ws_rx).await {
+        server.remove_peer(peer_id).await.unwrap();
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let addr = "127.0.0.1:8765".to_string();
@@ -62,39 +99,14 @@ async fn main() {
 
     while let Ok((stream, addr)) = listener.accept().await {
         let server = server.clone();
+        let socket = tokio_tungstenite::accept_async(stream).await.unwrap();
 
-        let handle = tokio::spawn(async move {
-            // Register the incoming connection with a Peer_ID
-            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
-            println!("Websocket connection established: {}\n", &addr);
+        let (my_send, my_recv) = oneshot::channel();
 
-            let msg = socket
-                .next()
-                .await
-                .ok_or_else(|| anyhow!("Did not receive Hello"))
-                .unwrap()
-                .unwrap();
-
-            // let (tx, rx) = mpsc::channel::<WsMessage>(10);
-            let (peer_id, ws_rx) = server.register_peer(msg, addr).unwrap();
-
-            // Let the peer know they're registered
-            socket
-                .send(WsMessage::Text("Hello".to_string()))
-                .await
-                .unwrap();
-
-            println!("Peer {} registered\n", &peer_id);
-
-            if let Err(_) = message_loop(&server, socket, peer_id, ws_rx).await {
-                server.remove_peer(peer_id).await.unwrap();
-            }
-
-            //     // TODO - DONE
-            //     // 1) Broadcast message to the MCU that the peer has left
-            //     // 2) Cleanup state - ROOM maintenance
-            // }
+        let kill = tokio::spawn(async move {
+            start_client(&server, socket, my_recv, addr).await;
         });
-        join!(handle).0.unwrap();
+
+        let _ = my_send.send(kill);
     }
 }
