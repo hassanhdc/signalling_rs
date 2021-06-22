@@ -1,3 +1,4 @@
+use tokio::join;
 use tokio::net::{TcpListener, TcpStream};
 
 use futures::channel::mpsc::UnboundedReceiver;
@@ -62,7 +63,7 @@ async fn main() {
     while let Ok((stream, addr)) = listener.accept().await {
         let server = server.clone();
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             // Register the incoming connection with a Peer_ID
             let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
             println!("Websocket connection established: {}\n", &addr);
@@ -94,5 +95,6 @@ async fn main() {
             //     // 2) Cleanup state - ROOM maintenance
             // }
         });
+        join!(handle).0.unwrap();
     }
 }

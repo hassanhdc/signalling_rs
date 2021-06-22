@@ -10,6 +10,8 @@ use tungstenite::Message as WsMessage;
 
 use futures::channel::mpsc::{self, UnboundedReceiver};
 
+const MCU: u32 = 999;
+
 // I have not gotten around to implementing peer messages as enum variants
 // which are deserialized and serialized as JSON messages
 
@@ -150,6 +152,15 @@ impl Server {
                         .ok_or_else(|| anyhow!("Cannot parse peer id"))
                         .unwrap();
                     println!("Peer is registering with ID: {}", &peer_id);
+
+                    // If the connecting peer is MCU, register them
+                    if peer_id.to_string().starts_with("999") {
+                        println!("MCU {} has connected..", peer_id);
+                        let mut room_servers = self.room_servers.lock().unwrap();
+                        room_servers.insert(peer_id, vec![]);
+                        drop(room_servers);
+                    }
+
                     Some(peer_id)
                 } else {
                     None
@@ -176,7 +187,7 @@ impl Server {
         let mut peers = self.peers.lock().unwrap();
 
         let peer = match peers.get(&peer_id).map(|peer| peer.to_owned()) {
-            Some(room) => Some(room),
+            Some(peer) => Some(peer),
             _ => None,
         }
         .unwrap();
@@ -185,28 +196,32 @@ impl Server {
             Some(room_id) => {
                 let mut rooms = self.rooms.lock().unwrap();
                 let room = rooms.get_mut(&room_id).unwrap();
-                if room.len() == 1 {
+                println!("Room {} cleaned for peer {}", room_id, peer_id);
+
+                room.retain(|id| id != &peer_id);
+
+                if (room.len() == 1) & room.contains(&room_id) {
+                    // If only the MCU alias remains in the room, remove it
                     println!("Last peer in the room {} left, destroying room...", room_id);
 
                     room.remove(0);
                     rooms.remove(&room_id);
+                    println!("Terminating alias..");
+                    drop(rooms);
                 } else {
-                    println!("Room {} cleaned for peer {}", room_id, peer_id);
-
-                    room.retain(|val| val != &peer_id);
-
                     // FIX: We only need to inform the server present in the ROOM
                     room.iter()
                         .map(|other| peers.get(&other).unwrap().to_owned())
                         .for_each(move |peer| {
                             let tx = &peer.tx.lock().unwrap();
-                            tx.unbounded_send(WsMessage::Text(format!(
-                                "ROOM_PEER_LEFT {}",
-                                peer_id
-                            )))
-                            .with_context(|| format!("Failed to send message on channel"))
-                            .unwrap();
+                            let msg = format!("ROOM_PEER_LEFT {}", peer_id);
+                            tx.unbounded_send(WsMessage::Text(msg.clone().into()))
+                                .with_context(|| {
+                                    format!("Failed to send message on channel: {}", msg.clone())
+                                })
+                                .unwrap();
                         });
+                    drop(rooms);
                 }
             }
             None => (),
@@ -214,6 +229,8 @@ impl Server {
 
         println!("Peer {} left. Removing..", &peer_id);
         peers.remove(&peer_id);
+        drop(peers);
+
         Ok(())
     }
 
@@ -306,8 +323,8 @@ impl Server {
 
             // Access the channel for the returned peer to we can forward them the message
             let tx = &peer.tx.lock().unwrap();
-            tx.unbounded_send(WsMessage::Text(resp.into()))
-                .with_context(|| format!("failed to send message on channel"))?;
+            tx.unbounded_send(WsMessage::Text(resp.clone().into()))
+                .with_context(|| format!("failed to send message on channel: {}", resp.clone()))?;
         } else if message.starts_with("ROOM_CMD") {
             // This condition is met under the following assumption:
             // The peer sending the message is not in a ROOM - Assert the following
@@ -372,6 +389,20 @@ impl Server {
                     // ROOM created, we're good
                     println!("ROOM {} created", room_id);
 
+                    // TODO: Inform the MCU so it can create an alias with a new connection
+                    // and join the created room
+
+                    println!("Informing MCU for alias creation");
+                    let mcu = peers.get(&MCU).unwrap().to_owned();
+                    let mcu_tx = mcu.tx.lock().unwrap();
+                    let mcu_msg = format!("SERVER_ALIAS {}", room_id);
+                    mcu_tx
+                        .unbounded_send(WsMessage::Text(mcu_msg.clone()))
+                        .with_context(|| {
+                            format!("failed to send message on channel: {}", mcu_msg.clone())
+                        })
+                        .unwrap();
+
                     format!("ROOM_OK")
                 } else {
                     // The given room_id is not unique
@@ -404,12 +435,12 @@ impl Server {
                         .map(|other| peers.get(&other).unwrap().to_owned())
                         .for_each(move |peer| {
                             let tx = &peer.tx.lock().unwrap();
-                            tx.unbounded_send(WsMessage::Text(format!(
-                                "ROOM_PEER_JOINED {}",
-                                from_id
-                            )))
-                            .with_context(|| format!("failed to send message on channel"))
-                            .unwrap();
+                            let msg = format!("ROOM_PEER_JOINED {}", from_id);
+                            tx.unbounded_send(WsMessage::Text(msg.clone().into()))
+                                .with_context(|| {
+                                    format!("failed to send message on channel: {}", msg.clone())
+                                })
+                                .unwrap();
                         });
 
                     let list = room
@@ -437,8 +468,8 @@ impl Server {
 
             // Forward the response we created to the peer's channel
             let tx = &peer.tx.lock().unwrap();
-            tx.unbounded_send(WsMessage::Text(resp.into()))
-                .with_context(|| format!("failed to send message on channel"))?;
+            tx.unbounded_send(WsMessage::Text(resp.clone().into()))
+                .with_context(|| format!("failed to send message on channel: {}", resp.clone()))?;
         } else if message.starts_with("ROOM_PEER_LIST") {
             // TODO: Refactor this bit into the "ROOM_PEER_..." branch
             let peers = self.peers.lock().unwrap();
@@ -459,8 +490,8 @@ impl Server {
             let resp = format!("ROOM_PEER_LIST {}", list);
 
             let tx = &peer.tx.lock().unwrap();
-            tx.unbounded_send(WsMessage::Text(resp.into()))
-                .with_context(|| format!("failed to send message on channel"))?;
+            tx.unbounded_send(WsMessage::Text(resp.clone().into()))
+                .with_context(|| format!("failed to send message on channel: {}", resp.clone()))?;
         } else if message.starts_with("SERVER_INVITE") {
             // TODO: Generalize this branch for "SERVER_..." messages
             // For testing purpose I'm going to hardcode the MCU identity as being '999'
@@ -474,8 +505,10 @@ impl Server {
             let mcu = peers.get(&999_u32).unwrap().to_owned();
 
             let tx = &mcu.tx.lock().unwrap();
-            tx.unbounded_send(WsMessage::Text(message.into()))
-                .with_context(|| format!("failed to send message on channel"))?;
+            tx.unbounded_send(WsMessage::Text(message.clone().into()))
+                .with_context(|| {
+                    format!("failed to send message on channel: {}", message.clone())
+                })?;
         }
 
         Ok(())
