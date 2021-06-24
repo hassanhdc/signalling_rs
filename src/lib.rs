@@ -13,7 +13,7 @@ use futures::channel::mpsc::{self, UnboundedReceiver};
 
 const MCU: u32 = 999;
 
-// I have not gotten around to implementing peer messages as enum variants
+// I have not got around to implementing peer messages as enum variants
 // which are deserialized and serialized as JSON messages
 
 // use serde_derive::{Deserialize, Serialize};
@@ -21,7 +21,7 @@ const MCU: u32 = 999;
 // #[serde(rename_all = "lowercase")]
 // enum SocketMsg {
 //     RoomPeer {
-//         // Messages starting wtih ROOM_PEER. Do not warrant the any action
+//         // Messages starting with ROOM_PEER. Do not warrant the any action
 //         // from the Socket Server other than routing the message itself
 //         //
 //         // TYPES:
@@ -262,7 +262,7 @@ impl Server {
             // i.e. peer.status != None
 
             // Action:
-            // Forward message addressed to the recepient - if not connected, inform the sending peer
+            // Forward message addressed to the recipient - if not connected, inform the sending peer
 
             let mut split = message["ROOM_PEER_MSG ".len()..].splitn(2, ' ');
             let to_id = split
@@ -287,7 +287,7 @@ impl Server {
             }
 
             let (peer, resp) = if let None = peers.get(&to_id) {
-                // If recepient peer is not connected, inform the sending peer
+                // If recipient peer is not connected, inform the sending peer
                 (
                     peers
                         .get(&from_id)
@@ -296,7 +296,7 @@ impl Server {
                     format!("ERROR peer {} not found", to_id),
                 )
             } else {
-                // Recepient peer is connected
+                // recipient peer is connected
 
                 // Get "room_id" of the sender
                 let room_id = peers
@@ -307,8 +307,8 @@ impl Server {
                     .unwrap()
                     .unwrap();
 
-                // Inform the sender if recepient is not present
-                // else forward the message to the recepient as is
+                // Inform the sender if recipient is not present
+                // else forward the message to the recipient as is
                 rooms
                     .get(&room_id)
                     .unwrap()
@@ -518,7 +518,7 @@ impl Server {
             drop(tx);
         } else if message.starts_with("SERVER_INVITE") {
             // TODO: Generalize this branch for "SERVER_..." messages
-            // For testing purpose I'm going to hardcode the MCU identity as being '999'
+            // For testing purpose I'm gonna hard-code the MCU identity as being '999'
             // FIX: Follow guidelines as stated in the design document
             // let mut split = message["SERVER_INVITE ".len()..].splitn(2, ' ');
             // let room_id = split
