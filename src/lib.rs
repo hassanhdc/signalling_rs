@@ -75,17 +75,15 @@ pub struct ServerInner {
     //  peers: {uid: [Peer tx,
     //                remote_address,
     //                <"room_id"|None>]}
-    pub peers: Mutex<HashMap<u32, Peer>>,
+    peers: Mutex<HashMap<u32, Peer>>,
     //
     //
     // rooms: {room_id: [peer1_id, peer2_id, peer3_id, ...]}
-    pub rooms: Mutex<HashMap<u32, Vec<u32>>>,
+    rooms: Mutex<HashMap<u32, Vec<u32>>>,
     //
     //
     // room_servers: {server_id: [room_id1, room_id2 ...]}
     room_servers: Mutex<HashMap<u32, Vec<u32>>>,
-    // server: TcpListener,
-    // ws_msg_tx: Arc<Mutex<mpsc::UnboundedSender<WsMessage>>>,
 }
 
 impl std::ops::Deref for Peer {
@@ -112,7 +110,7 @@ impl std::ops::Deref for Server {
 }
 
 impl Peer {
-    pub fn new(
+    fn new(
         id: u32,
         addr: SocketAddr,
         status: Option<u32>,
@@ -135,8 +133,6 @@ impl Peer {
 
 impl Server {
     pub fn new() -> Result<Self> {
-        // let (ws_msg_tx, ws_msg_rx) = mpsc::unbounded::<WsMessage>();
-
         let server = Server(Arc::new(ServerInner {
             peers: Mutex::new(HashMap::new()),
             rooms: Mutex::new(HashMap::new()),
